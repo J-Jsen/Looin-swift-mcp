@@ -34,17 +34,31 @@ USB-connected device via usbmux.
   running in the foreground in a booted simulator **or** on a USB-connected,
   trusted device.
 
-## Build
+## Install
+
+### Option A — prebuilt (no Xcode/Swift needed)
+
+One command downloads the latest release binary to `~/.lookin-swift/lookin-swift`,
+clears the Gatekeeper quarantine flag, runs the self-test, and prints the config:
 
 ```bash
-swift build -c release
-# binary: .build/release/lookin-swift
+curl -fsSL https://raw.githubusercontent.com/J-Jsen/Looin-swift-mcp/main/install-release.sh | bash
 ```
 
-## Install (stable path)
+The binary is an **unsigned universal** (arm64 + x86_64) Mach-O; the script
+`xattr`-clears the quarantine so macOS will run it. To do it by hand instead:
 
-Build + copy to `~/.lookin-swift/lookin-swift` (the path `~/.claude.json` points
-at) + run the self-test. Run after changing the Swift code, then restart Claude Code:
+```bash
+mkdir -p ~/.lookin-swift
+curl -fsSL https://github.com/J-Jsen/Looin-swift-mcp/releases/latest/download/lookin-swift -o ~/.lookin-swift/lookin-swift
+chmod +x ~/.lookin-swift/lookin-swift
+xattr -dr com.apple.quarantine ~/.lookin-swift/lookin-swift
+```
+
+### Option B — build from source
+
+Builds and installs to the same stable path, then runs the self-test. Use this
+if you change the Swift code:
 
 ```bash
 ./install.sh
@@ -52,7 +66,7 @@ at) + run the self-test. Run after changing the Swift code, then restart Claude 
 
 ## Register with an MCP client
 
-After `./install.sh`, point your client at the installed binary
+After installing, point your client at the installed binary
 `~/.lookin-swift/lookin-swift` (use the absolute path — most clients don't expand `~`).
 
 **Claude Code** — `claude mcp add`:
