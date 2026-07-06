@@ -1,4 +1,4 @@
-# Looin-swift-mcp
+# Lookin-swift-mcp
 
 A Swift MCP server that talks directly to the **official** LookinServer
 (`pod 'LookinServer'`) — no Lookin.app, no special iOS fork.
