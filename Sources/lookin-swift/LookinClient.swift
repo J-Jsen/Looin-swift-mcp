@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 enum LookinError: Error, LocalizedError {
     case message(String)
@@ -210,12 +211,31 @@ final class LookinClient {
         }
     }
 
-    func getScreenshotPNG(oid: UInt64) throws -> Data {
-        let details = try fetchDetails(oids: [oid], taskType: 2 /* GroupScreenshot */, needAttrs: false)
-        guard let png = details.first(where: { $0.oid == oid })?.screenshot ?? details.first?.screenshot else {
-            throw LookinError.message("LookinServer returned no screenshot for oid \(oid). The view may be off-screen or too large.")
+    /// Screenshot a view. If `oid` is nil, screenshots the key window. If
+    /// `maxSize` is set, the PNG is downscaled so its longest side ≤ maxSize px
+    /// (smaller payload, faster to transfer and read).
+    func getScreenshotPNG(oid: UInt64?, maxSize: Int? = nil) throws -> Data {
+        let targetOid = try oid ?? keyWindowOid()
+        let details = try fetchDetails(oids: [targetOid], taskType: 2 /* GroupScreenshot */, needAttrs: false)
+        guard let png = details.first(where: { $0.oid == targetOid })?.screenshot ?? details.first?.screenshot else {
+            throw LookinError.message("LookinServer returned no screenshot for oid \(targetOid). The view may be off-screen or too large.")
+        }
+        if let maxSize = maxSize, maxSize > 0 {
+            return LookinClient.downscalePNG(png, maxSize: maxSize) ?? png
         }
         return png
+    }
+
+    /// The key window's (layer) oid, from a fresh hierarchy fetch.
+    func keyWindowOid() throws -> UInt64 {
+        let payload = try LookinClient.encodeRequest(["clientVersion": clientVersion])
+        let response = try roundTrip(type: RequestType.hierarchy, payload: payload)
+        let info = try decodeHierarchy(response)
+        let item = info.displayItems.first(where: { $0.representedAsKeyWindow }) ?? info.displayItems.first
+        guard let oid = item?.oid else {
+            throw LookinError.message("Empty hierarchy — is the app in the foreground?")
+        }
+        return oid
     }
 
     /// Run the HierarchyDetails(203) flow for the given oids. The server may
@@ -357,6 +377,23 @@ final class LookinClient {
             }
         }
         return node
+    }
+
+    /// Downscale a PNG so its longest side ≤ maxSize px, re-encoded as PNG.
+    /// Returns nil on failure (caller falls back to the original).
+    static func downscalePNG(_ data: Data, maxSize: Int) -> Data? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxSize,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, thumb, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     static func jsonString(_ obj: [String: Any]) throws -> String {

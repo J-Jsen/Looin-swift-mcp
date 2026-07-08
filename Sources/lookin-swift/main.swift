@@ -121,13 +121,18 @@ server.register(Tool(
 
 server.register(Tool(
     name: "lookin_get_screenshot",
-    description: "Get a view's screenshot (PNG) by oid, from the hierarchy the app already rendered. Get the oid from lookin_get_hierarchy first.",
-    inputSchema: oidSchema,
+    description: "Screenshot (PNG). Omit oid to capture the whole key window (no need to look up an oid first). Pass maxSize to downscale for a smaller, faster image when you just need to see the layout.",
+    inputSchema: [
+        "type": "object",
+        "properties": [
+            "oid": ["type": "number", "description": "Target view oid (from lookin_get_hierarchy). Omit for the full key window."],
+            "maxSize": ["type": "number", "description": "If set, longest side is scaled down to this many pixels (e.g. 800)."],
+        ],
+    ],
     handler: { args in
-        guard let oid = (args["oid"] as? NSNumber)?.uint64Value else {
-            throw LookinError.message("Missing required argument: oid")
-        }
-        let png = try LookinClient.shared.getScreenshotPNG(oid: oid)
+        let oid = (args["oid"] as? NSNumber)?.uint64Value
+        let maxSize = (args["maxSize"] as? NSNumber)?.intValue
+        let png = try LookinClient.shared.getScreenshotPNG(oid: oid, maxSize: maxSize)
         return [[
             "type": "image",
             "data": png.base64EncodedString(),

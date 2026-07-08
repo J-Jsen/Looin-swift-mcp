@@ -33,73 +33,89 @@ final class DeviceSelection {
         return result
     }
 
-    /// Connect honoring the current target. Returns a socket fd for Peertalk.
-    func connect() throws -> Int32 {
-        switch target {
-        case .simulator:
-            return try connectSimulator()
-        case .device(let udid):
-            return try connectDevice(udid: udid)
-        case .auto:
-            if let fd = try? connectSimulator() { return fd }
-            return try connectFirstDevice()
-        }
+    // Caches so we don't re-probe / re-enumerate on every call. deviceId is the
+    // Mac↔device USB link id (stable across app restarts; only invalid on
+    // unplug). autoRoute remembers whether simulator or which device answered
+    // last, so auto mode skips the simulator probes on a device-only setup.
+    private var deviceIdCache: [String: Int] = [:]
+    private enum Route { case simulator; case device(Int) }
+    private var autoRoute: Route?
+
+    /// Clear connection caches (call when a connection unexpectedly fails).
+    func invalidateCaches() {
+        deviceIdCache.removeAll()
+        autoRoute = nil
     }
 
-    /// Connect to an arbitrary `port` on the current target (used for the
+    /// Connect to LookinServer (simulator ports, or device ports via usbmux).
+    func connect() throws -> Int32 {
+        return try connect(simPorts: Array(Peertalk.simulatorPorts), devicePorts: Array(UsbMux.devicePorts))
+    }
+
+    /// Connect to an arbitrary `port` on the current target (the
     /// LookinServer-Control command channel on :47180).
     func connectPort(_ port: Int) throws -> Int32 {
+        return try connect(simPorts: [port], devicePorts: [port])
+    }
+
+    // MARK: - Connect core
+
+    private func connect(simPorts: [Int], devicePorts: [Int]) throws -> Int32 {
         switch target {
         case .simulator:
-            return try Peertalk.connect(host: "127.0.0.1", port: port)
+            return try connectSim(simPorts)
         case .device(let udid):
-            let devices = try UsbMux.listDevices()
-            guard let dev = devices.first(where: { $0.udid == udid }) else {
-                throw LookinError.message("USB device \(udid) not found.")
-            }
-            return try UsbMux.connectToDevice(deviceId: dev.deviceId, port: port)
+            return try connectDeviceUdid(udid, devicePorts)
         case .auto:
-            if let fd = try? Peertalk.connect(host: "127.0.0.1", port: port) { return fd }
-            if let devices = try? UsbMux.listDevices() {
-                for dev in devices {
-                    if let fd = try? UsbMux.connectToDevice(deviceId: dev.deviceId, port: port) { return fd }
+            return try connectAuto(simPorts: simPorts, devicePorts: devicePorts)
+        }
+    }
+
+    private func connectAuto(simPorts: [Int], devicePorts: [Int]) throws -> Int32 {
+        // Reuse the last good route first.
+        if let route = autoRoute {
+            switch route {
+            case .simulator:
+                if let fd = try? connectSim(simPorts) { return fd }
+            case .device(let id):
+                if let fd = try? connectDevicePorts(id, devicePorts) { return fd }
+            }
+            autoRoute = nil // stale — fall through to re-resolve
+        }
+        if let fd = try? connectSim(simPorts) { autoRoute = .simulator; return fd }
+        if let devices = try? UsbMux.listDevices() {
+            for d in devices {
+                deviceIdCache[d.udid] = d.deviceId
+                if let fd = try? connectDevicePorts(d.deviceId, devicePorts) {
+                    autoRoute = .device(d.deviceId); return fd
                 }
             }
-            throw LookinError.message("Cannot reach port \(port). Is the app (with pod 'LookinServer-Control') running in the foreground?")
         }
+        throw LookinError.message("Cannot reach LookinServer. Start the app (with pod 'LookinServer', and 'LookinServer-Control' for taps) in a booted simulator, or connect a USB device and run it in the foreground.")
     }
 
-    // MARK: - Helpers
-
-    private func connectSimulator() throws -> Int32 {
-        for port in Peertalk.simulatorPorts {
+    private func connectSim(_ ports: [Int]) throws -> Int32 {
+        for port in ports {
             if let fd = try? Peertalk.connect(host: "127.0.0.1", port: port) { return fd }
         }
-        throw LookinError.message("No LookinServer on a booted simulator (ports \(Peertalk.simulatorPorts.lowerBound)-\(Peertalk.simulatorPorts.upperBound)). Is the app running in the foreground?")
+        throw LookinError.message("No LookinServer on a booted simulator. Is the app running in the foreground?")
     }
 
-    private func connectDevice(udid: String) throws -> Int32 {
-        let devices = try UsbMux.listDevices()
-        guard let dev = devices.first(where: { $0.udid == udid }) else {
-            throw LookinError.message("USB device \(udid) not found. Run lookin_list_devices to see connected devices.")
+    private func connectDeviceUdid(_ udid: String, _ ports: [Int]) throws -> Int32 {
+        // Try cached deviceId; on failure, refresh the map once and retry.
+        if let id = deviceIdCache[udid], let fd = try? connectDevicePorts(id, ports) { return fd }
+        for d in try UsbMux.listDevices() { deviceIdCache[d.udid] = d.deviceId }
+        guard let id = deviceIdCache[udid] else {
+            throw LookinError.message("USB device \(udid) not found. Run lookin_list_devices.")
         }
-        return try connectToDevicePorts(dev.deviceId)
+        return try connectDevicePorts(id, ports)
     }
 
-    private func connectFirstDevice() throws -> Int32 {
-        if let devices = try? UsbMux.listDevices() {
-            for dev in devices {
-                if let fd = try? connectToDevicePorts(dev.deviceId) { return fd }
-            }
-        }
-        throw LookinError.message("Cannot reach LookinServer. Start the app (with pod 'LookinServer') in a booted simulator, or connect a USB device and run it in the foreground.")
-    }
-
-    private func connectToDevicePorts(_ deviceId: Int) throws -> Int32 {
-        for port in UsbMux.devicePorts {
+    private func connectDevicePorts(_ deviceId: Int, _ ports: [Int]) throws -> Int32 {
+        for port in ports {
             if let fd = try? UsbMux.connectToDevice(deviceId: deviceId, port: port) { return fd }
         }
-        throw LookinError.message("Connected to device but no LookinServer port (\(UsbMux.devicePorts.lowerBound)-\(UsbMux.devicePorts.upperBound)) is open. Is the app in the foreground?")
+        throw LookinError.message("Connected to device but no listener on ports \(ports.first ?? 0)-\(ports.last ?? 0) is open. Is the app in the foreground?")
     }
 
     private static func bootedSimulators() -> [(udid: String, name: String)] {
